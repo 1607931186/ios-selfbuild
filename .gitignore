@@ -1,0 +1,15 @@
+# 构建产物
+build/
+build-sim/
+DerivedData/
+out/
+*.ipa
+*.xcarchive
+
+# CI 里现生成，不提交
+SelfApp.xcodeproj/
+xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# 系统垃圾
+.DS_Store

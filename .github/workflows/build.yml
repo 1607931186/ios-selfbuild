@@ -1,0 +1,172 @@
+# 只做「未签名 IPA」：签名和安装在你自己的设备上完成（B 路线）。
+# 这样证书换了、被吊销了、想换成免费 Apple ID 侧载，都不需要改仓库。
+#
+# 如果 macos-15 镜像将来下线，把 runs-on 改成 macos-26 或 macos-latest 即可。
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SCHEME: SelfApp
+  BUNDLE_ID: com.yinuoma.selfapp
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. 主产物：未签名 .ipa → artifact，打 tag 时顺带发 Release
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-15
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest stable Xcode
+        run: |
+          XCAPP="$(ls -d /Applications/Xcode*.app 2>/dev/null | grep -v -i beta | sort -V | tail -1 || true)"
+          if [ -z "$XCAPP" ]; then
+            XCAPP="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          fi
+          echo "Using $XCAPP"
+          sudo xcode-select -s "$XCAPP"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build for device (no code signing)
+        run: |
+          xcodebuild \
+            -project "${SCHEME}.xcodeproj" \
+            -scheme "${SCHEME}" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/${SCHEME}.app"
+          test -d "$APP" || { echo "::error::missing $APP"; exit 1; }
+
+          rm -rf out && mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          ( cd out && zip -qry "../${SCHEME}-unsigned.ipa" Payload )
+
+          # 确认关键信息，方便在日志里核对
+          plutil -p "out/Payload/${SCHEME}.app/Info.plist" \
+            | grep -E 'CFBundleIdentifier|CFBundleExecutable|CFBundleVersion' || true
+          unzip -l "${SCHEME}-unsigned.ipa" | head -20
+          echo "IPA size: $(du -h "${SCHEME}-unsigned.ipa" | cut -f1)"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SelfApp-unsigned-ipa
+          path: SelfApp-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach IPA to GitHub Release (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SelfApp-unsigned.ipa
+          generate_release_notes: true
+
+  # ---------------------------------------------------------------------------
+  # 2. 没有 Mac 时的「肉眼」：在模拟器里装一次并截图
+  #    非阻塞（continue-on-error），截图失败不影响 IPA
+  # ---------------------------------------------------------------------------
+  preview:
+    name: Simulator screenshot
+    runs-on: macos-15
+    timeout-minutes: 40
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest stable Xcode
+        run: |
+          XCAPP="$(ls -d /Applications/Xcode*.app 2>/dev/null | grep -v -i beta | sort -V | tail -1 || true)"
+          if [ -z "$XCAPP" ]; then
+            XCAPP="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          fi
+          sudo xcode-select -s "$XCAPP"
+          xcodebuild -version
+
+      - name: Generate Xcode project
+        run: |
+          if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
+          xcodegen generate
+
+      - name: Build for simulator
+        run: |
+          xcodebuild \
+            -project "${SCHEME}.xcodeproj" \
+            -scheme "${SCHEME}" \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build-sim \
+            -quiet \
+            build
+
+      - name: Boot simulator, install, screenshot
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)["devices"]
+          for runtime in sorted(data):
+              for device in data[runtime]:
+                  if "iPhone" in device["name"]:
+                      print(device["udid"])
+                      raise SystemExit
+          ')
+          test -n "$UDID" || { echo "::error::no iPhone simulator found"; exit 1; }
+          echo "Simulator: $UDID"
+
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b || true
+          xcrun simctl install "$UDID" "build-sim/Build/Products/Debug-iphonesimulator/${SCHEME}.app"
+          xcrun simctl launch "$UDID" "$BUNDLE_ID" || true
+          sleep 8
+          xcrun simctl io "$UDID" screenshot screenshot.png
+          xcrun simctl spawn "$UDID" log show --last 60s \
+            --predicate "processImagePath CONTAINS \"${SCHEME}\"" | tail -80 > app.log || true
+          ls -lh screenshot.png app.log
+
+      - name: Upload screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulator-preview
+          path: |
+            screenshot.png
+            app.log
+          if-no-files-found: warn
+          retention-days: 14

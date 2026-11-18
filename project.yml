@@ -1,0 +1,46 @@
+name: SelfApp
+
+options:
+  bundleIdPrefix: com.yinuoma
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+
+targets:
+  SelfApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+        excludes:
+          - Info.plist
+    settings:
+      base:
+        # 改这一行就能换 bundle id（要和你的证书描述文件匹配）
+        PRODUCT_BUNDLE_IDENTIFIER: com.yinuoma.selfapp
+        INFOPLIST_FILE: Sources/Info.plist
+        GENERATE_INFOPLIST_FILE: "NO"
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: "NO"
+        # 未签名构建：CI 只产未签名包，签名在设备端完成
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""
+
+schemes:
+  SelfApp:
+    build:
+      targets:
+        SelfApp: all
+    run:
+      config: Debug
+    archive:
+      config: Release
